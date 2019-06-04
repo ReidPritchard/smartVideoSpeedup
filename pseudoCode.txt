@@ -1,0 +1,11 @@
+Steps:
+    a) take video filename from input (look into piping)
+  1) Split audio from video
+    a) Use system("ffmpeg -i "+ videoInput.avi + " -vn tempSound.au?") - [.au as it is better for the libsndfile library]
+    b) load in tempSound.wav back into the program (using some library TBD)
+  2) Break audio into chunks
+    
+    a) Find min & Max Volume and use as threshold
+  3) Check if chunk is silent (or close to min threshold value)
+  4) If silent, save timestamp in list
+  5) Once all chunks are checked, either re-assemble or reload file and edit based on timestamp list 
