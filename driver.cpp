@@ -63,6 +63,7 @@ int silenceThreshold = 30;
 
 bool verbose = false;
 bool printFFMPEG = false;
+bool cleanUp = true;
 
 bool printHelp = false;
 
@@ -70,7 +71,7 @@ fs::path videoFilePath = "";
 
 int main(int argc, char *argv[]) {
   int opt;
-  while ((opt = getopt(argc, argv, "vVi:s:n:ft:h")) != -1) {
+  while ((opt = getopt(argc, argv, "vVi:s:n:ft:ch")) != -1) {
     switch (opt) {
       case 'v':
         verbose = true;
@@ -88,10 +89,13 @@ int main(int argc, char *argv[]) {
         if (optarg) normSpeed = atof(optarg);
         break;
       case 'f':
-        if (optarg) printFFMPEG = true;
+        printFFMPEG = true;
         break;
       case 't':
         if (optarg) silenceThreshold = atoi(optarg);
+        break;
+      case 'c':
+        cleanUp = false;
         break;
       case 'h':
         std::cout << version << std::endl;
@@ -103,6 +107,7 @@ int main(int argc, char *argv[]) {
         -n [NORMAL_SPEED]:      Set speed of non-silence in input\n\
         -f:                     Print all ffmpeg commands for manual testing\n\
         -t [SILENCE_THRESHOLD]: Set silence threshold in db (audio normalization is automatically used)\n\
+        -c                      Stop file clean up after finish\n\
         -h:                     Output this prompt (overrides all other options)"
                   << std::endl;
         return 0;
@@ -143,7 +148,8 @@ int main(int argc, char *argv[]) {
       joinConverted(videoFilePath.string(), videoOutputFilePath);
       logTime("Converted Videos Joined   ", intermediateStart);
 
-      cleanDir(videoOutputFilePath, tempSilenceFilename, videoFilePath.string());
+      if (cleanUp) cleanDir(videoOutputFilePath, tempSilenceFilename, videoFilePath.string());
+
     } catch (std::runtime_error) {
       std::cout << "Error thrown, exiting" << std::endl;
       return -1;
@@ -172,8 +178,8 @@ int normalizeAudio(fs::path &fileName) {
     path = fileName.stem().string();
   }
 
-  const std::string normalizeAudio = "ffmpeg -loglevel fatal -f mp4 -y -i " + fileName.string() +
-                                     " -af dynaudnorm -vcodec copy " + path + "-normalized.mp4";
+  const std::string normalizeAudio =
+      "ffmpeg -loglevel fatal -y -i " + fileName.string() + " -af dynaudnorm -vcodec copy " + path + "-normalized.mp4";
 
   if (printFFMPEG) std::cout << normalizeAudio << std::endl;
 
@@ -228,17 +234,15 @@ int splitVideoHelper(fs::path videoFileName, std::string outputFilePath, silentT
 
   std::string splitVideoCommand = "ffmpeg -loglevel fatal -ss " + std::to_string(timestamp.getStartTime()) + " -i \"" +
                                   videoFileName.string() + "\" -t " + std::to_string(timestamp.getDuration()) +
-                                  " -n -map 0 -avoid_negative_ts 1 " + outputFilePath + "/" + ss.str();
-
-  // "-ss $startCutTime -i $inputFilePath -ss 0 -c copy -to $endCutTime -avoid_negative_ts make_zero $outputFilePath"
+                                  " -b:v 1500k -n -map 0 -avoid_negative_ts 1 " + outputFilePath + "/" + ss.str();
 
   std::string logMessage = "Split Video to " + ss.str();  // Build Log string
   if (isSilence) {                                        // If file is silence
-    splitVideoCommand += "-silence.mp4";                  // Add to split command
-    logMessage += "-silence.mp4";                         // Add to log message
+    splitVideoCommand += "-silence.ts";                   // Add to split command
+    logMessage += "-silence.ts";                          // Add to log message
   } else {                                                // If video is to be kept at normal speed
-    splitVideoCommand += "-norm.mp4";                     // Add to split command
-    logMessage += "-norm.mp4";                            // Add to log message
+    splitVideoCommand += "-norm.ts";                      // Add to split command
+    logMessage += "-norm.ts";                             // Add to log message
   }
 
   if (printFFMPEG) std::cout << splitVideoCommand << std::endl;
@@ -256,10 +260,10 @@ int splitVideo(fs::path videoFileName, std::string outputFilePath, std::vector<s
   norm.setEndTime(times[0].getStartTime());  // Set end time to start of first timestamp
 
   for (int i = 0; i < times.size() - 1; i++) {  // Loop through all "timestamp" objects
-    if (norm.getStartTime() != norm.getEndTime() &&
+    if (norm.getStartTime() != norm.getEndTime() && norm.getDuration() > .5 &&
         splitVideoHelper(videoFileName, outputFilePath, norm, iter, false) != 0)  // split video on non-silence section
       return -1;
-    if (splitVideoHelper(videoFileName, outputFilePath, times[i], iter, true) != 0)
+    if (times[i].getDuration() > .5 && splitVideoHelper(videoFileName, outputFilePath, times[i], iter, true) != 0)
       return -1;                                   // Split video on current silent section
     norm.setStartTime(times[i].getEndTime());      // Set start of non-silent timestamp to end of last silence timestamp
     norm.setEndTime(times[i + 1].getStartTime());  // Set end of non-silent timestamp to start of next silence timestamp
@@ -308,8 +312,8 @@ int speedVideosHelper(std::string outputFilePath, fs::path filePath, float speed
 
   std::string speedCommand = "ffmpeg -loglevel fatal -y -i \"" + filePath.string() +
                              "\" -filter_complex \"[0:v]setpts=PTS/" + std::to_string(speed) + "[v];[0:a]" + filter +
-                             "[a]\" -map \"[v]\" -map \"[a]\" -vcodec libx264 " + outputFilePath +
-                             "/convertedVideos/converted-" + filePath.filename().string();
+                             "[a]\" -map \"[v]\" -map \"[a]\" -b:v 1500k " + outputFilePath + "/convertedVideos/converted-" +
+                             filePath.filename().string();
 
   if (printFFMPEG) std::cout << speedCommand << std::endl;
 
@@ -324,7 +328,7 @@ int speedVideos(std::string outputFilePath, float silenceSpeed, float normSpeed)
 
   fs::directory_iterator end_itr;  // Default ctor yields past-the-end
 
-  std::regex filenameReg(".+-(\\w+).mp4");
+  std::regex filenameReg(".+-(\\w+).ts");
   std::smatch match;
 
   for (fs::directory_iterator directoryIter(outputFilePath); directoryIter != end_itr; directoryIter++) {
@@ -343,8 +347,8 @@ int speedVideos(std::string outputFilePath, float silenceSpeed, float normSpeed)
 }
 
 int buildJoinFile(std::string outputFilepath) {
-  const std::regex convertedRgx(".+converted-.+-(\\w+).mp4");  // Regex to match with converted filenames
-  std::smatch match;                                           // Match variable
+  const std::regex convertedRgx(".+converted-.+-(\\w+).ts");  // Regex to match with converted filenames
+  std::smatch match;                                          // Match variable
 
   std::vector<std::string> filePathsVec;  // Vector of filepaths to be sorted and copied to join.txt later
 
@@ -369,11 +373,11 @@ int buildJoinFile(std::string outputFilepath) {
 int fixSilentFirstClip(fs::path outputFilepath) {
   int returnValue = 0;
 
-  if (!fs::exists(outputFilepath.stem().string() + "/convertedVideos/converted-0000-silence.mp4")) return -1;
+  if (!fs::exists(outputFilepath.stem().string() + "/convertedVideos/converted-0000-silence.ts")) return -1;
 
   const std::string audioProbe =
       "ffprobe -i " + outputFilepath.stem().string() +
-      "/convertedVideos/converted-0000-silence.mp4 -show_streams -select_streams a -loglevel error > superTemp.txt";
+      "/convertedVideos/converted-0000-silence.ts -show_streams -select_streams a -loglevel error > superTemp.txt";
 
   // std::cout << audioProbe << std::endl;
 
@@ -383,13 +387,13 @@ int fixSilentFirstClip(fs::path outputFilepath) {
     // ffmpeg -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=44100 -i video.mov \
   -shortest -c:v copy -c:a aac output.mov
     const std::string addEmptyAudio = "ffmpeg -loglevel fatal -f lavfi -i anullsrc -i " + outputFilepath.string() +
-                                      "/convertedVideos/converted-0000-silence.mp4 -shortest -c:v copy -c:a aac " +
-                                      outputFilepath.string() + "/convertedVideos/converted-0000-silence-temp.mp4";
+                                      "/convertedVideos/converted-0000-silence.ts -shortest -c:v copy -c:a aac " +
+                                      outputFilepath.string() + "/convertedVideos/converted-0000-silence-temp.ts";
 
     returnValue = errorLog(system(addEmptyAudio.c_str()), "Adding empty audio to first clip");
 
-    std::string mvTempVid = "mv " + outputFilepath.string() + "/convertedVideos/converted-0000-silence-temp.mp4 " +
-                            outputFilepath.string() + "/convertedVideos/converted-0000-silence.mp4";
+    std::string mvTempVid = "mv " + outputFilepath.string() + "/convertedVideos/converted-0000-silence-temp.ts " +
+                            outputFilepath.string() + "/convertedVideos/converted-0000-silence.ts";
 
     if (returnValue == 0) errorLog(system(mvTempVid.c_str()), "Rename 0000 tempFile");
   }
